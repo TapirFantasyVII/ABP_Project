@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: videogame-postgres
+    environment:
+      POSTGRES_DB: videogames
+      POSTGRES_USER: recommender
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

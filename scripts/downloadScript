@@ -1,0 +1,247 @@
+import csv
+import os
+import time
+import requests
+
+INPUT_FILE = "data/applications.csv"
+IMAGE_DIR = "data/img"
+OUTPUT_FILE = "data/applications_images.csv"
+
+STEAM_API = "https://store.steampowered.com/api/appdetails/"
+
+# Tiempo normal entre juegos
+REQUEST_DELAY = 0.5
+
+# Tiempo de espera cuando Steam responde 429
+RATE_LIMIT_DELAY = 60
+
+# Número máximo de intentos para un juego
+MAX_RETRIES = 5
+
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+
+def download_image(game_id):
+    params = {
+        "appids": game_id,
+        "filters": "basic"
+    }
+
+    for attempt in range(MAX_RETRIES):
+
+        try:
+            response = requests.get(
+                STEAM_API,
+                params=params,
+                timeout=15
+            )
+
+            # Steam nos está limitando
+            if response.status_code == 429:
+
+                # Steam puede enviar Retry-After
+                retry_after = response.headers.get("Retry-After")
+
+                if retry_after:
+                    wait_time = int(retry_after)
+                else:
+                    wait_time = RATE_LIMIT_DELAY * (attempt + 1)
+
+                print(
+                    f"[429] Steam está limitando las peticiones. "
+                    f"Esperando {wait_time} segundos..."
+                )
+
+                time.sleep(wait_time)
+                continue
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            game_data = data.get(str(game_id))
+
+            if not game_data or not game_data.get("success"):
+                print(f"[NO ENCONTRADO] {game_id}")
+                return None
+
+            game = game_data["data"]
+
+            image_url = (
+                game.get("capsule_image")
+                or game.get("header_image")
+            )
+
+            if not image_url:
+                print(f"[SIN IMAGEN] {game_id}")
+                return None
+
+            image_path = os.path.join(
+                IMAGE_DIR,
+                f"{game_id}.jpg"
+            )
+
+            # Si ya existe, no volver a descargarla
+            if os.path.exists(image_path):
+                print(f"[YA EXISTE] {game_id}")
+                return f"{game_id}.jpg"
+
+            image_response = requests.get(
+                image_url,
+                timeout=15
+            )
+
+            if image_response.status_code == 429:
+
+                print(
+                    f"[429] Steam CDN está limitando. "
+                    f"Esperando {RATE_LIMIT_DELAY} segundos..."
+                )
+
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
+
+            image_response.raise_for_status()
+
+            with open(image_path, "wb") as image_file:
+                image_file.write(image_response.content)
+
+            print(f"[OK] {game_id}")
+
+            return f"{game_id}.jpg"
+
+        except requests.RequestException as e:
+
+            print(
+                f"[ERROR] {game_id}: {e} "
+                f"(intento {attempt + 1}/{MAX_RETRIES})"
+            )
+
+            if attempt < MAX_RETRIES - 1:
+                wait_time = 10 * (attempt + 1)
+
+                print(
+                    f"Esperando {wait_time} segundos..."
+                )
+
+                time.sleep(wait_time)
+            else:
+                print(
+                    f"[FALLIDO] {game_id}"
+                )
+
+    return None
+
+
+def main():
+
+    if not os.path.exists(INPUT_FILE):
+        print(f"No existe {INPUT_FILE}")
+        return
+
+    # Juegos que ya procesamos
+    processed = set()
+
+    if os.path.exists(OUTPUT_FILE):
+
+        with open(
+            OUTPUT_FILE,
+            "r",
+            encoding="utf-8",
+            newline=""
+        ) as output_file:
+
+            reader = csv.DictReader(output_file)
+
+            for row in reader:
+                processed.add(row["game_id"])
+
+    with open(
+        INPUT_FILE,
+        "r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as csv_file:
+
+        reader = csv.reader(csv_file)
+
+        rows = list(reader)
+
+    if not rows:
+        print("El CSV está vacío")
+        return
+
+    # Detectar cabecera
+    try:
+        int(rows[0][0])
+        has_header = False
+    except ValueError:
+        has_header = True
+
+    start = 1 if has_header else 0
+
+    output_exists = os.path.exists(OUTPUT_FILE)
+
+    with open(
+        OUTPUT_FILE,
+        "a",
+        encoding="utf-8",
+        newline=""
+    ) as output:
+
+        writer = csv.writer(output)
+
+        if not output_exists:
+            writer.writerow(["game_id", "image"])
+
+        for index, row in enumerate(
+            rows[start:],
+            start=start
+        ):
+
+            if len(row) < 2:
+                continue
+
+            game_id = row[0].strip()
+            game_name = row[1].strip()
+
+            if not game_id:
+                continue
+
+            # Ya procesado anteriormente
+            if game_id in processed:
+                continue
+
+            print(
+                f"Procesando: {game_id} - {game_name}"
+            )
+
+            image_name = download_image(game_id)
+
+            if image_name:
+
+                writer.writerow([
+                    game_id,
+                    image_name
+                ])
+
+                # Fuerza escritura inmediata
+                output.flush()
+
+                processed.add(game_id)
+
+            # Espera normal
+            time.sleep(REQUEST_DELAY)
+
+
+if __name__ == "__main__":
+
+    try:
+        main()
+
+    except KeyboardInterrupt:
+
+        print("\n")
+        print("Proceso detenido por el usuario.")
+        print("El progreso se ha guardado.")
+        print("Puedes volver a ejecutarlo cuando quieras.")
